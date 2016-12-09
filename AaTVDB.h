@@ -1,5 +1,5 @@
-#ifndef __AA_TVDB__
-#define __AA_TVDB__
+#ifndef AA_TVDB__H
+#define AA_TVDB__H
 
 #include <vector>
 #include <AaXml>
@@ -146,5 +146,5 @@ namespace Aa
   } // namespace TVDB
 } // namespace Aa
 
-#endif // __AA_TVDB__
+#endif // AA_TVDB__H
 

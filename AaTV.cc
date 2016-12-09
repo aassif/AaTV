@@ -16,228 +16,96 @@
 #include <QNetworkReply>
 #include <QTreeWidget>
 //#include <QHeaderView>
+#include <QListWidget>
 #include <QDir>
+#include <QtConcurrent/QtConcurrent>
+#include <QFutureWatcher>
+#include <QSettings>
 #include <fstream> // debug
 #include <sstream>
 #include "qfilewidget.h"
-#include "AaTVDB.h"
+#include "AaTV.h"
 
-class QNetworkPixmap : public QFrame
+void QNetworkPixmap::init ()
 {
-  Q_OBJECT
+  QSizePolicy policy (QSizePolicy::Preferred, QSizePolicy::Preferred);
+  policy.setHeightForWidth (true);
+  policy.setHorizontalStretch (1);
+  policy.setVerticalStretch (0);
+  setSizePolicy (policy);
+  clear ();
+}
 
-  protected:
-    QSize m_size;
-    QPixmap m_pixmap;
-    QNetworkAccessManager m_network;
-    QNetworkReply * m_reply;
+QNetworkPixmap::QNetworkPixmap (QWidget * parent) :
+  QWidget (parent),
+  m_size (0, 0),
+  m_pixmap (),
+  m_reply (NULL)
+{
+  init ();
+}
 
-  private:
-    void init ()
-    {
-      QSizePolicy policy (QSizePolicy::Preferred, QSizePolicy::Preferred);
-      policy.setHeightForWidth (true);
-      policy.setHorizontalStretch (1);
-      policy.setVerticalStretch (0);
-      setSizePolicy (policy);
-      clear ();
-    }
+QNetworkPixmap::QNetworkPixmap (int w, int h, QWidget * parent) :
+  QWidget (parent),
+  m_size (w, h),
+  m_pixmap (),
+  m_reply (NULL)
+{
+  init ();
+}
 
-  public:
-    QNetworkPixmap (QWidget * parent = NULL) :
-      QFrame (parent),
-      m_size (0, 0),
-      m_pixmap (),
-      m_reply (NULL)
-    {
-      init ();
-    }
+QSize QNetworkPixmap::sizeHint () const
+{
+  return m_pixmap.size ();
+}
 
-    QNetworkPixmap (int w, int h, QWidget * parent = NULL) :
-      QFrame (parent),
-      m_size (w, h),
-      m_pixmap (),
-      m_reply (NULL)
-    {
-      init ();
-    }
+int QNetworkPixmap::heightForWidth (int width) const
+{
+  int w = m_pixmap.width ();
+  int h = m_pixmap.height ();
+  return w != 0 ? (width * h) / w : 0;
+}
 
-    virtual QSize sizeHint () const
-    {
-      return m_pixmap.size ();
-    }
+void QNetworkPixmap::query (const QString & url)
+{
+  if (m_reply != NULL)
+  {
+    m_reply->disconnect (SIGNAL (finished ()), this, 0);
+    m_reply->close ();
+    m_reply = NULL; // FIXME: cannot delete!
+  }
 
-    virtual int heightForWidth (int width) const
-    {
-      int w = m_pixmap.width ();
-      int h = m_pixmap.height ();
-      return w != 0 ? (width * h) / w : 0;
-    }
+  m_reply = m_network.get (QNetworkRequest (url));
+  connect (m_reply, SIGNAL (finished ()), SLOT (setPixmap ()));
+  clear ();
+}
 
-  public slots:
-    void query (const QString & url)
-    {
-      if (m_reply != NULL)
-      {
-        m_reply->disconnect (SIGNAL(finished()), this, 0);
-        m_reply->close ();
-        m_reply = NULL; // FIXME: cannot delete!
-      }
+void QNetworkPixmap::clear ()
+{
+  m_pixmap = QPixmap (m_size);
+  m_pixmap.fill (palette ().color (QPalette::Dark));
+  updateGeometry ();
+  update ();
+}
 
-      m_reply = m_network.get (QNetworkRequest (url));
-      connect (m_reply, SIGNAL(finished()), SLOT(setPixmap()));
-      clear ();
-    }
+void QNetworkPixmap::setPixmap ()
+{
+  QImage image = QImage::fromData (m_reply->readAll ());
+  m_pixmap = QPixmap::fromImage (image);
+  m_reply->close ();
+  m_reply = NULL; // FIXME: delete!
+  updateGeometry ();
+  update ();
+}
 
-    void clear ()
-    {
-      m_pixmap = QPixmap (m_size);
-      m_pixmap.fill (palette ().color (QPalette::Dark));
-      updateGeometry ();
-      update ();
-    }
-
-  private slots:
-    void setPixmap ()
-    {
-      QImage image = QImage::fromData (m_reply->readAll ());
-      m_pixmap = QPixmap::fromImage (image);
-      m_reply->close ();
-      m_reply = NULL; // FIXME: delete!
-      updateGeometry ();
-      update ();
-    }
-
-  protected:
-    virtual void paintEvent (QPaintEvent * e)
-    {
-      QPainter p (this);
-      p.drawPixmap (0, 0, m_pixmap.scaled (size (), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    }
-};
+void QNetworkPixmap::paintEvent (QPaintEvent *)
+{
+  QPainter p (this);
+  p.drawPixmap (0, 0, m_pixmap.scaled (size (), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+}
 
 namespace AaTV
 {
-// AaTV::DataQuery /////////////////////////////////////////////////////////////
-
-  class DataQuery : public QThread
-  {
-    Q_OBJECT
-
-    protected:
-      Aa::TVDB::Data m_data;
-      QNetworkAccessManager m_network;
-      QNetworkReply * m_reply;
-      mutable QMutex m_mutex;
-
-    public:
-      DataQuery (QObject * parent = NULL);
-      const Aa::TVDB::Data    & data    ()      const {return m_data;}
-      const Aa::TVDB::Series  & series  (int k) const {return m_data.series [k];}
-      const Aa::TVDB::Episode & episode (int k) const {return m_data.episodes [k];}
-
-    protected:
-      virtual void run ();
-
-    public slots:
-      void query (const QUrl &);
-  };
-
-// AaTV::PageSeries ////////////////////////////////////////////////////////////
-
-  class PageSeries : public QWizardPage
-  {
-    Q_OBJECT
-
-    protected:
-      DataQuery m_tvdb;
-      QLineEdit m_title;
-      QComboBox m_combo;
-      QTextEdit m_overview;
-
-    public:
-      // Constructor.
-      PageSeries (QWidget * parent = NULL);
-      const Aa::TVDB::Series * currentItem () const;
-      // QWizardPage.
-      virtual bool isComplete () const;
-      virtual int nextId () const;
-
-    private slots:
-      void populate ();
-      void update (int);
-
-    public slots:
-      void query (const QString & title);
-  };
-
-// AaTV::PageEpisodes //////////////////////////////////////////////////////////
-
-  class PageEpisodes : public QWizardPage
-  {
-    Q_OBJECT
-
-    protected:
-      PageSeries * m_series;
-      DataQuery m_tvdb;
-      QNetworkPixmap m_banner;
-      QTreeWidget m_tree;
-      QExistingDirectoryWidget m_directory;
-
-    private:
-      static Qt::CheckState RecursiveCheckState (QTreeWidgetItem *,
-                                                 int column,
-                                                 Qt::CheckState);
-
-    public:
-      // Constructor.
-      PageEpisodes (PageSeries *, QWidget * parent = NULL);
-      QStringList checkedItems () const;
-      QString directory () const;
-      // QWizardPage.
-      virtual void initializePage ();
-      virtual bool isComplete () const;
-      virtual int nextId () const;
-
-    private slots:
-      void populate ();
-      void update (QTreeWidgetItem *, int column);
-
-    public slots:
-      void query (const Aa::TVDB::Series *);
-  };
-
-// AaTV::Wizard ////////////////////////////////////////////////////////////////
-
-  class Wizard : public QWizard
-  {
-    public:
-      enum
-      {
-        Intro = 0,
-        Series = 1,
-        Episodes = 2,
-        Final = 3
-      };
-
-    private:
-      class PageFinal : public QWizardPage
-      {
-        private:
-          PageEpisodes * m_episodes;
-          QProgressBar m_progress;
-          QTextEdit m_blabla;
-          QThread * m_thread;
-
-        public:
-          PageFinal (PageEpisodes *);
-          virtual void initializePage ();
-          virtual int nextId () const {return -1;}
-      };
-
-    public:
-      Wizard (QWidget * parent = 0);
-  };
 
 ////////////////////////////////////////////////////////////////////////////////
 // AaTV::DataQuery /////////////////////////////////////////////////////////////
@@ -298,7 +166,8 @@ namespace AaTV
     m_tvdb (this),
     m_title (this),
     m_combo (this),
-    m_overview (this)
+    m_overview (this),
+    m_language (this)
   {
     QString title =
       tr("PageSettings");
@@ -310,24 +179,54 @@ namespace AaTV
     setSubTitle (subtitle);
     //setCommitPage (true);
 
-    m_overview.setReadOnly (true);
+    m_language.addItem ("en");
+    m_language.addItem ("fr");
 
+    m_overview.setReadOnly (true);
+#if 0
     QVBoxLayout * layout = new QVBoxLayout;
     //layout->setContentsMargins (0, 0, 0, 0);
     layout->setSpacing (2);
-    layout->addWidget (new QLabel (tr("Titre de la s�rie")));
+    layout->addWidget (new QLabel (tr("Titre de la série")));
     layout->addWidget (&m_title);
+    layout->addSpacing (6);
+    layout->addWidget (new QLabel (tr("Langue")));
+    layout->addWidget (&m_language);
     layout->addSpacing (6);
     layout->addWidget (new QLabel (tr("Suggestions")));
     layout->addWidget (&m_combo);
     layout->addSpacing (6);
-    layout->addWidget (new QLabel (tr("R�sum�")));
+    layout->addWidget (new QLabel (tr("Résumé")));
     layout->addWidget (&m_overview);
     setLayout (layout);
+#else
+    QGridLayout * layout = new QGridLayout;
+    //layout->setContentsMargins (0, 0, 0, 0);
+    //layout->setSpacing (2);
+    layout->addWidget (new QLabel (tr("Titre de la série")), 0, 0, 1, 1);
+    layout->addWidget (&m_title, 1, 0, 1, 1);
+    layout->setRowMinimumHeight (2, 6);
+    //layout->addSpacing (6);
+    layout->addWidget (new QLabel (tr("Langue")), 0, 1, 1, 1);
+    layout->addWidget (&m_language, 1, 1, 1, 1);
+    //layout->addSpacing (6);
+    layout->addWidget (new QLabel (tr("Suggestions")), 3, 0, 1, 2);
+    layout->addWidget (&m_combo, 4, 0, 1, 2);
+    layout->setRowMinimumHeight (5, 6);
+    //layout->addSpacing (6);
+    layout->addWidget (new QLabel (tr("Résumé")), 6, 0, 1, 2);
+    layout->addWidget (&m_overview, 7, 0, 1, 2);
+    setLayout (layout);
+#endif
+    connect (&m_title,    SIGNAL(textChanged(const QString &)), this, SLOT(query()));
+    connect (&m_language, SIGNAL(currentIndexChanged(int)),     this, SLOT(query()));
+    connect (&m_tvdb,     SIGNAL(finished()),                   this, SLOT(populate()));
+    connect (&m_combo,    SIGNAL(currentIndexChanged(int)),     this, SLOT(update(int)));
+  }
 
-    connect (&m_title, SIGNAL(textChanged(const QString &)), this, SLOT(query(const QString &)));
-    connect (&m_tvdb,  SIGNAL(finished()),                   this, SLOT(populate()));
-    connect (&m_combo, SIGNAL(currentIndexChanged(int)),     this, SLOT(update(int)));
+  QString PageSeries::language () const
+  {
+    return m_language.currentText ();
   }
 
   const Aa::TVDB::Series * PageSeries::currentItem () const
@@ -346,7 +245,7 @@ namespace AaTV
     return m_combo.currentIndex () != -1;
   }
 
-  void PageSeries::query (const QString & title)
+  void PageSeries::query ()
   {
     static const QString BASE =
       "http://www.thetvdb.com/api/GetSeries.php?seriesname=";
@@ -355,8 +254,9 @@ namespace AaTV
     m_overview.clear ();
     emit completeChanged ();
 
+    QString title = m_title.text ();
     if (! title.isEmpty ())
-      m_tvdb.query (QUrl (BASE + title));
+      m_tvdb.query (QUrl (BASE + title + "&language=" + m_language.currentText ()));
   }
 
   QString qtvdb_utf8 (const std::string & utf8)
@@ -400,6 +300,7 @@ namespace AaTV
     m_series (series),
     m_tvdb (this),
     m_banner (758, 140, this),
+    m_title (this),
     m_tree (this),
     m_directory (this)
   {
@@ -415,7 +316,7 @@ namespace AaTV
 
     m_tree.setColumnCount (1);
     //m_tree.setEditTriggers (QAbstractItemView::NoEditTriggers);
-    m_tree.setEditTriggers (QAbstractItemView::DoubleClicked);
+    m_tree.setEditTriggers (QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
     m_tree.setSelectionBehavior (QAbstractItemView::SelectRows);
     m_tree.setWordWrap (false);
     m_tree.setAlternatingRowColors (true);
@@ -428,21 +329,27 @@ namespace AaTV
     layout->setSpacing (2);
     layout->addWidget (&m_banner, 0, Qt::AlignHCenter);
     layout->addSpacing (6);
-    //layout->addWidget (new QLabel (tr("�pisodes")));
+    layout->addWidget (new QLabel (tr("Titre de la série")));
+    layout->addWidget (&m_title);
+    layout->addSpacing (6);
+    //layout->addWidget (new QLabel (tr("Épisodes")));
     layout->addWidget (&m_tree);
     layout->addSpacing (6);
     layout->addWidget (new QLabel (tr("Destination")));
     layout->addWidget (&m_directory);
     setLayout (layout);
 
-    connect (&m_tvdb, SIGNAL(finished()), this, SLOT(populate()));
-    connect (&m_tree, SIGNAL(itemChanged(QTreeWidgetItem *, int)),
-             this,    SLOT(update(QTreeWidgetItem *, int)));
+    QSettings settings;
+    m_directory.setText (settings.value ("destination", "").toString ());
+
+    connect (&m_tvdb, SIGNAL (finished ()), this, SLOT (populate ()));
+    connect (&m_tree, SIGNAL (itemChanged (QTreeWidgetItem *, int)),
+             this,    SLOT   (update      (QTreeWidgetItem *, int)));
   }
 
   void PageEpisodes::initializePage ()
   {
-    this->query (m_series->currentItem ());
+    this->query (m_series->currentItem (), m_series->language ());
   }
 
   int PageEpisodes::nextId () const
@@ -456,7 +363,7 @@ namespace AaTV
     return ! items.isEmpty ();
   }
 
-  void PageEpisodes::query (const Aa::TVDB::Series * series)
+  void PageEpisodes::query (const Aa::TVDB::Series * series, const QString & language)
   {
     m_banner.clear ();
     m_tree.clear ();
@@ -467,7 +374,7 @@ namespace AaTV
       m_banner.query (BANNERS + qtvdb_utf8 (series->banner));
 
       static const QString API = "http://www.thetvdb.com/api/";
-      m_tvdb.query (QUrl (API + Aa::TVDB::API_KEY.c_str () + "/series/" + qtvdb_utf8 (series->id) + "/all/"));
+      m_tvdb.query (QUrl (API + Aa::TVDB::API_KEY.c_str () + "/series/" + qtvdb_utf8 (series->id) + "/all/" + language + ".xml"));
     }
   }
 
@@ -497,7 +404,7 @@ namespace AaTV
 
   void PageEpisodes::populate ()
   {
-    QString show = qtvdb_utf8 (m_tvdb.series (0).name);
+    m_title.setText (qtvdb_utf8 (m_tvdb.series (0).name));
 
     std::map<QString, QTreeWidgetItem *> seasons;
 
@@ -528,7 +435,7 @@ namespace AaTV
       /*QString text = scene_capitalize (show) + '.'
                    + scene_episode (season, number) + '.'
                    + scene_capitalize (name) + '.'
-                   + "DVDRip" + '.' + "XviD" + '-' + "AASSiF";*/
+                   + "DVDRip" + '.' + "XviD" + '-' + "PAPA";*/
 
       QTreeWidgetItem * item = new QTreeWidgetItem (QStringList (text));
       item->setFlags (Qt::ItemIsSelectable
@@ -582,6 +489,8 @@ namespace AaTV
 
   QStringList PageEpisodes::checkedItems () const
   {
+    QString show = m_title.text ();
+
     QStringList strList;
     for (int i = 0; i < m_tree.topLevelItemCount (); ++i)
     {
@@ -590,7 +499,7 @@ namespace AaTV
       {
         QTreeWidgetItem * episode = season->child (j);
         if (episode->checkState (0) != Qt::Unchecked)
-          strList << (season->text (0) + '/' + episode->text (0));
+          strList << (show + '/' + season->text (0) + '/' + episode->text (0));
       }
     }
     return strList;
@@ -601,14 +510,36 @@ namespace AaTV
   }
 
 ////////////////////////////////////////////////////////////////////////////////
-// AaTV::Wizard::PageFinal /////////////////////////////////////////////////////
+  // AaTV::PageFinal::DirMaker /////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
 
-  Wizard::PageFinal::PageFinal (PageEpisodes * episodes) :
+  PageFinal::PathMaker::PathMaker (const QString & dir) :
+    m_dir (dir),
+    m_mutex ()
+  {
+  }
+
+  PageFinal::PathMaker::PathMaker (const PathMaker & p) :
+    m_dir (p.m_dir),
+    m_mutex ()
+  {
+  }
+
+  bool PageFinal::PathMaker::operator() (const QString & path)
+  {
+    QMutexLocker locker (&m_mutex);
+    return QDir (m_dir).mkpath (path);
+  }
+
+////////////////////////////////////////////////////////////////////////////////
+// AaTV::PageFinal /////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+  PageFinal::PageFinal (PageEpisodes * episodes) :
     m_episodes (episodes),
     m_progress (this),
-    m_blabla (this),
-    m_thread (NULL)
+    m_items (this),
+    m_watcher (this)
   {
     QString title =
       tr("PageFinal");
@@ -619,29 +550,34 @@ namespace AaTV
     setTitle (title);
     setSubTitle (subtitle);
 
-    m_blabla.setReadOnly (true);
-
     QVBoxLayout * layout = new QVBoxLayout;
     layout->setSpacing (2);
     layout->addWidget (&m_progress);
     layout->addSpacing (6);
-    layout->addWidget (&m_blabla, 1);
+    layout->addWidget (&m_items);
     setLayout (layout);
+
+    connect (&m_watcher, SIGNAL (resultReadyAt (int)),             this,        SLOT (colorize (int)));
+    connect (&m_watcher, SIGNAL (progressRangeChanged (int, int)), &m_progress, SLOT (setRange (int, int)));
+    connect (&m_watcher, SIGNAL (progressValueChanged (int)),      &m_progress, SLOT (setValue (int)));
   }
 
-  void Wizard::PageFinal::initializePage ()
+  void PageFinal::initializePage ()
   {
-    static const QString RED   = "<span style=\"color:red;\">%1</span>";
-    static const QString GREEN = "<span style=\"color:green;\">%1</span>";
-
-    QDir dir (m_episodes->directory ());
+    QSettings settings;
+    const QString & dir = m_episodes->directory ();
+    settings.setValue ("destination", dir);
     QStringList items = m_episodes->checkedItems ();
+    m_items.addItems (items);
+    m_watcher.setFuture (QtConcurrent::mapped (items, PathMaker (dir)));
+  }
 
-    for (int i = 0; i < items.size (); ++i)
-    {
-      bool okay = dir.mkpath (items [i]);
-      m_blabla.append ((okay ? GREEN : RED).arg (items [i]));
-    }
+  void PageFinal::colorize (int index)
+  {
+    bool okay = m_watcher.resultAt (index);
+    QListWidgetItem * item = m_items.item (index);
+    item->setForeground (okay ? Qt::darkGreen : Qt::red);
+    //if (! okay) m_items.scrollToItem (item);
   }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -660,6 +596,8 @@ namespace AaTV
     setPage (Series,   series);
     setPage (Episodes, episodes);
     setPage (Final,    final);
+
+    setMinimumHeight (600);
   }
 
 } // namespace AaTV
@@ -669,12 +607,14 @@ namespace AaTV
 int main (int argc, char ** argv)
 {
   QApplication app (argc, argv);
+  app.setWindowIcon (QIcon (":/icons/old-tv.48x48.png"));
+
+  QApplication::setOrganizationName   ("Aa!");
+  QApplication::setOrganizationDomain ("benassarou.fr");
+  QApplication::setApplicationName    ("AaTV");
+
   AaTV::Wizard wizard;
-  wizard.setWindowIcon (QIcon ("icons/old-tv.16x16.png"));
   wizard.show ();
+
   return app.exec ();
 }
-
-////////////////////////////////////////////////////////////////////////////////
-
-#include "AaTV.moc"
